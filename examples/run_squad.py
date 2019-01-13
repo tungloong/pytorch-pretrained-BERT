@@ -141,9 +141,9 @@ def read_squad_examples(input_file, is_training):
                 end_position = None
                 orig_answer_text = None
                 if is_training:
-                    if len(qa["answers"]) != 1:
-                        raise ValueError(
-                            "For training, each question should have exactly 1 answer.")
+                    # if len(qa["answers"]) != 1:
+                    #     raise ValueError(
+                    #         "For training, each question should have exactly 1 answer.")
                     answer = qa["answers"][0]
                     orig_answer_text = answer["text"]
                     answer_offset = answer["answer_start"]
@@ -926,14 +926,14 @@ def main():
 
     if args.do_predict and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         eval_examples = read_squad_examples(
-            input_file=args.predict_file, is_training=False)
+            input_file=args.predict_file, is_training=True)
         eval_features = convert_examples_to_features(
             examples=eval_examples,
             tokenizer=tokenizer,
             max_seq_length=args.max_seq_length,
             doc_stride=args.doc_stride,
             max_query_length=args.max_query_length,
-            is_training=False)
+            is_training=True)
 
         logger.info("***** Running predictions *****")
         logger.info("  Num orig examples = %d", len(eval_examples))
@@ -944,20 +944,27 @@ def main():
         all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
         all_example_index = torch.arange(all_input_ids.size(0), dtype=torch.long)
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_example_index)
+        all_start_positions = torch.tensor([f.start_position for f in eval_features], dtype=torch.long)
+        all_end_positions = torch.tensor([f.end_position for f in eval_features], dtype=torch.long)
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids,
+                                  all_start_positions, all_end_positions, all_example_index)
         # Run prediction for full data
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.predict_batch_size)
 
         model.eval()
         all_results = []
+        logit_result = []
         logger.info("Start evaluating")
-        for input_ids, input_mask, segment_ids, example_indices in tqdm(eval_dataloader, desc="Evaluating"):
+        for batch in tqdm(eval_dataloader, desc="Evaluating"):
             if len(all_results) % 1000 == 0:
                 logger.info("Processing example: %d" % (len(all_results)))
+            input_ids, input_mask, segment_ids, all_start_positions, all_end_positions, example_indices = batch
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
+            all_start_positions = all_start_positions.to(device)
+            all_end_positions = all_end_positions.to(device)
             with torch.no_grad():
                 batch_start_logits, batch_end_logits = model(input_ids, segment_ids, input_mask)
             for i, example_index in enumerate(example_indices):
@@ -965,6 +972,10 @@ def main():
                 end_logits = batch_end_logits[i].detach().cpu().tolist()
                 eval_feature = eval_features[example_index.item()]
                 unique_id = int(eval_feature.unique_id)
+                start_position = all_start_positions[i].detach().cpu().tolist()
+                end_position = all_end_positions[i].detach().cpu().tolist()
+                print(start_position, end_position)
+                print(start_logits)
                 all_results.append(RawResult(unique_id=unique_id,
                                              start_logits=start_logits,
                                              end_logits=end_logits))
